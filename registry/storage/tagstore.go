@@ -29,7 +29,7 @@ type tagStore struct {
 func NewStore(repository *repository, blobStore *blobStore) *tagStore {
 	lookupConcurrencyFactor, err := strconv.Atoi(os.Getenv("STORAGE_TAGSTORE_LOOKUP_CONCURRENCY"))
 	if err != nil {
-		lookupConcurrencyFactor = 256
+		lookupConcurrencyFactor = 64
 	}
 	return &tagStore{
 		repository: repository,
