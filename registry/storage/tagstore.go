@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"os"
 	"path"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/distribution/distribution/v3"
@@ -21,8 +23,20 @@ var _ distribution.TagService = &tagStore{}
 type tagStore struct {
 	repository *repository
 	blobStore  *blobStore
+	lookupConcurrencyFactor int
 }
 
+func NewStore(repository *repository, blobStore *blobStore) *tagStore {
+	lookupConcurrencyFactor, err := strconv.Atoi(os.Getenv("STORAGE_TAGSTORE_LOOKUP_CONCURRENCY"))
+	if err != nil {
+		lookupConcurrencyFactor = 256
+	}
+	return &tagStore{
+		repository: repository,
+		blobStore:  blobStore,
+		lookupConcurrencyFactor: lookupConcurrencyFactor,
+	}
+}
 // All returns all tags
 func (ts *tagStore) All(ctx context.Context) ([]string, error) {
 	var tags []string
@@ -136,8 +150,6 @@ func (ts *tagStore) linkedBlobStore(ctx context.Context, tag string) *linkedBlob
 // Lookup recovers a list of tags which refer to this digest.  When a manifest is deleted by
 // digest, tag entries which point to it need to be recovered to avoid dangling tags.
 func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([]string, error) {
-	const concurrencyFactor int = 256
-
 	allTags, err := ts.All(ctx)
 	switch err.(type) {
 	case distribution.ErrRepositoryUnknown:
@@ -149,7 +161,7 @@ func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([
 		return nil, err
 	}
 
-	limiter := make(chan struct{}, concurrencyFactor)
+	limiter := make(chan struct{}, ts.lookupConcurrencyFactor)
 	errChan := make(chan error, len(allTags))
 	tagChan := make(chan string, len(allTags))
 	ctx, cancel := context.WithCancel(ctx)
