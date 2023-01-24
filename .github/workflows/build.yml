@@ -9,7 +9,7 @@ on:
   pull_request:
 
 env:
-  DOCKERHUB_SLUG: distribution/distribution
+  DOCKERHUB_SLUG: docker.enapter.ninja/infrastructure/distribution
 
 jobs:
   build:
@@ -68,8 +68,9 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v1
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: docker.enapter.com
+          username: ${{ secrets.ENAPTER_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.ENAPTER_DOCKERHUB_TOKEN }}
       -
         name: Build image
         uses: docker/bake-action@v1
