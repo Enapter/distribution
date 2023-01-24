@@ -136,7 +136,7 @@ func (ts *tagStore) linkedBlobStore(ctx context.Context, tag string) *linkedBlob
 // Lookup recovers a list of tags which refer to this digest.  When a manifest is deleted by
 // digest, tag entries which point to it need to be recovered to avoid dangling tags.
 func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([]string, error) {
-	const concurrencyFactor int = 32
+	const concurrencyFactor int = 256
 
 	allTags, err := ts.All(ctx)
 	switch err.(type) {
