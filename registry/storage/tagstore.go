@@ -2,8 +2,11 @@ package storage
 
 import (
 	"context"
+	"os"
 	"path"
 	"sort"
+	"strconv"
+	"sync"
 
 	"github.com/distribution/distribution/v3"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
@@ -18,8 +21,21 @@ var _ distribution.TagService = &tagStore{}
 // which only makes use of the Digest field of the returned distribution.Descriptor
 // but does not enable full roundtripping of Descriptor objects
 type tagStore struct {
-	repository *repository
-	blobStore  *blobStore
+	repository              *repository
+	blobStore               *blobStore
+	lookupConcurrencyFactor int
+}
+
+func NewStore(repository *repository, blobStore *blobStore) *tagStore {
+	lookupConcurrencyFactor, err := strconv.Atoi(os.Getenv("STORAGE_TAGSTORE_LOOKUP_CONCURRENCY"))
+	if err != nil {
+		lookupConcurrencyFactor = 64
+	}
+	return &tagStore{
+		repository:              repository,
+		blobStore:               blobStore,
+		lookupConcurrencyFactor: lookupConcurrencyFactor,
+	}
 }
 
 // All returns all tags
@@ -132,45 +148,109 @@ func (ts *tagStore) linkedBlobStore(ctx context.Context, tag string) *linkedBlob
 	}
 }
 
+type atomicError struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (e *atomicError) Store(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.err = err
+}
+
+func (e *atomicError) Load() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.err
+}
+
 // Lookup recovers a list of tags which refer to this digest.  When a manifest is deleted by
 // digest, tag entries which point to it need to be recovered to avoid dangling tags.
 func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([]string, error) {
 	allTags, err := ts.All(ctx)
 	switch err.(type) {
+	case nil:
+		break
 	case distribution.ErrRepositoryUnknown:
 		// This tag store has been initialized but not yet populated
-		break
-	case nil:
 		break
 	default:
 		return nil, err
 	}
 
-	var tags []string
-	for _, tag := range allTags {
-		tagLinkPathSpec := manifestTagCurrentPathSpec{
-			name: ts.repository.Named().Name(),
-			tag:  tag,
-		}
+	lookupErr := &atomicError{}
 
-		tagLinkPath, _ := pathFor(tagLinkPathSpec)
-		tagDigest, err := ts.blobStore.readlink(ctx, tagLinkPath)
-		if err != nil {
-			switch err.(type) {
-			case storagedriver.PathNotFoundError:
-				continue
+	inputChan := make(chan string)
+	outputChan := make(chan string, len(allTags))
+
+	workersWaitGroup := sync.WaitGroup{}
+	workersWaitGroup.Add(ts.lookupConcurrencyFactor)
+
+	for i := 0; i < ts.lookupConcurrencyFactor; i++ {
+		go func() {
+			defer workersWaitGroup.Done()
+			for tag := range inputChan {
+				tagLinkPathSpec := manifestTagCurrentPathSpec{
+					name: ts.repository.Named().Name(),
+					tag:  tag,
+				}
+
+				tagLinkPath, _ := pathFor(tagLinkPathSpec)
+				tagDigest, err := ts.blobStore.readlink(ctx, tagLinkPath)
+
+				if err != nil {
+					switch err.(type) {
+					case storagedriver.PathNotFoundError:
+						continue
+					}
+					lookupErr.Store(err)
+				}
+
+				if tagDigest == desc.Digest {
+					outputChan <- tag
+				}
 			}
-			return nil, err
+		}()
+	}
+
+	for _, tag := range allTags {
+		if lookupErr.Load() != nil {
+			break
 		}
 
-		if tagDigest == desc.Digest {
-			tags = append(tags, tag)
+		// Fastcheck for ctx.Done()
+		select {
+		case <-ctx.Done():
+			lookupErr.Store(ctx.Err())
+			break
+		default:
 		}
+
+		select {
+		case <-ctx.Done():
+			lookupErr.Store(ctx.Err())
+			break
+		case inputChan <- tag:
+		}
+	}
+	close(inputChan)
+
+	workersWaitGroup.Wait()
+
+	close(outputChan)
+
+	if err := lookupErr.Load(); err != nil {
+		return nil, err
+	}
+
+	tags := make([]string, 0, len(outputChan))
+	for tag := range outputChan {
+		tags = append(tags, tag)
 	}
 
 	return tags, nil
 }
-
 func (ts *tagStore) ManifestDigests(ctx context.Context, tag string) ([]digest.Digest, error) {
 	tagLinkPath := func(name string, dgst digest.Digest) (string, error) {
 		return pathFor(manifestTagIndexEntryLinkPathSpec{
