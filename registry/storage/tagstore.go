@@ -219,19 +219,9 @@ func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([
 			break
 		}
 
-		// Fastcheck for ctx.Done()
-		select {
-		case <-ctx.Done():
-			lookupErr.Store(ctx.Err())
+		if err := pushTag(ctx, inputChan, tag); err != nil {
+			lookupErr.Store(err)
 			break
-		default:
-		}
-
-		select {
-		case <-ctx.Done():
-			lookupErr.Store(ctx.Err())
-			break
-		case inputChan <- tag:
 		}
 	}
 	close(inputChan)
@@ -251,6 +241,23 @@ func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([
 
 	return tags, nil
 }
+
+func pushTag(ctx context.Context, ch chan string, tag string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case ch <- tag:
+	}
+
+	return nil
+}
+
 func (ts *tagStore) ManifestDigests(ctx context.Context, tag string) ([]digest.Digest, error) {
 	tagLinkPath := func(name string, dgst digest.Digest) (string, error) {
 		return pathFor(manifestTagIndexEntryLinkPathSpec{
